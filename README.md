@@ -53,3 +53,7 @@ A interface usa C# e WPF; um processo Python mantém a sessão CoAP/DTLS com o a
 A chave privada fica protegida pelo Windows DPAPI para o usuário que fez o cadastro. Configurações pessoais, chaves, bibliotecas baixadas e executáveis não entram no Git. As licenças das dependências acompanham os pacotes instalados.
 
 Execute `Aplicar-protecao.ps1` para restringir as conexões de saída dos executáveis do Brisa aos IPs cadastrados, preservando o loopback. O Windows pedirá acesso de administrador. `Desfazer-protecao.ps1` remove essas regras. A proteção vale para a pasta onde foi aplicada e deve ser reaplicada após mudar os IPs ou mover o aplicativo; ela não controla as conexões feitas pelo próprio ar-condicionado.
+
+## Licença
+
+O Brisa usa a licença [MIT](LICENSE). As dependências mantêm suas próprias licenças.
