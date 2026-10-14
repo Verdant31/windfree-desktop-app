@@ -4,26 +4,26 @@ using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
-using System.Windows.Media;
-using Forms = System.Windows.Forms;
 
 sealed class NativeTray : IDisposable
 {
     const int Callback = 0x8001;
     readonly IntPtr hwnd;
     readonly HwndSource source;
-    readonly Icon icon;
+    readonly Window window;
+    Icon icon;
     readonly Action activate;
-    readonly Forms.ContextMenuStrip menu;
+    readonly List<KeyValuePair<string, Action>> menu;
     readonly uint taskbarCreated;
     NotifyData data;
     public bool Registered { get; private set; }
     public int BoundsResult { get; private set; }
-    public NativeTray(Window window, Icon ownedIcon, Action onActivate, Forms.ContextMenuStrip contextMenu)
+    public NativeTray(Window owner, Icon ownedIcon, Action onActivate, List<KeyValuePair<string, Action>> items)
     {
+        window = owner;
         hwnd = new WindowInteropHelper(window).Handle;
         source = HwndSource.FromHwnd(hwnd);
-        icon = ownedIcon; activate = onActivate; menu = contextMenu;
+        icon = ownedIcon; activate = onActivate; menu = items;
         taskbarCreated = RegisterWindowMessage("TaskbarCreated");
         data = new NotifyData { cbSize = (uint)Marshal.SizeOf(typeof(NotifyData)), hWnd = hwnd, uID = 1,
             uFlags = 1 | 2 | 4 | 128, uCallbackMessage = Callback, hIcon = icon.Handle, szTip = "Brisa", szInfo = "", szInfoTitle = "" };
@@ -31,6 +31,7 @@ sealed class NativeTray : IDisposable
     }
     void Add() { Registered=Shell_NotifyIcon(0, ref data); data.uVersion = 4; Shell_NotifyIcon(4, ref data); }
     public string Text { set { data.szTip = value.Length > 127 ? value.Substring(0,127) : value; Shell_NotifyIcon(1,ref data); } }
+    public Icon Icon { set { var old = icon; icon = value; data.hIcon = icon.Handle; Shell_NotifyIcon(1, ref data); old.Dispose(); } }
     IntPtr Hook(IntPtr handle, int message, IntPtr w, IntPtr l, ref bool handled)
     {
         if ((uint)message == taskbarCreated) Add();
@@ -40,20 +41,40 @@ sealed class NativeTray : IDisposable
             int id = (int)((l.ToInt64() >> 16) & 0xffff);
             if (id != 0 && id != data.uID) return IntPtr.Zero;
             if (action == 0x202 || action == 0x203 || action == 0x400 || action == 0x401) { activate(); handled = true; }
-            else if (action == 0x205 || action == 0x7b)
-            {
-                SetForegroundWindow(hwnd);
-                var cursor = Forms.Cursor.Position; menu.Show(cursor.X, cursor.Y); handled = true;
-            }
+            else if (action == 0x205 || action == 0x7b) { ShowMenu(); handled = true; }
         }
         return IntPtr.Zero;
+    }
+    void ShowMenu()
+    {
+        IntPtr popup = CreatePopupMenu();
+        try
+        {
+            for (int i = 0; i < menu.Count; i++)
+            {
+                if (menu[i].Key == null) AppendMenu(popup, 0x800, UIntPtr.Zero, null);
+                else AppendMenu(popup, 0, (UIntPtr)(uint)(i + 1), menu[i].Key);
+            }
+            SetMenuDefaultItem(popup, 1, 0);
+            NativeWindow.Point cursor;
+            NativeWindow.GetCursorPos(out cursor);
+            var area = new NativeWindow.Rect { Left = cursor.X, Top = cursor.Y, Right = cursor.X + 1, Bottom = cursor.Y + 1 };
+            var info = new NativeWindow.Monitor { Size = (uint)Marshal.SizeOf(typeof(NativeWindow.Monitor)) };
+            bool lower = !NativeWindow.GetMonitorInfo(NativeWindow.MonitorFromRect(ref area, 2), ref info) || cursor.Y > (info.Bounds.Top + info.Bounds.Bottom) / 2;
+            uint flags = 0x100 | 0x80 | 0x2 | (lower ? 0x20u : 0u) | (GetSystemMetrics(40) != 0 ? 0x8u : 0u);
+            SetForegroundWindow(hwnd);
+            int command = TrackPopupMenuEx(popup, flags, cursor.X, cursor.Y, hwnd, IntPtr.Zero);
+            PostMessage(hwnd, 0, IntPtr.Zero, IntPtr.Zero);
+            if (command > 0 && command <= menu.Count && menu[command - 1].Value != null) window.Dispatcher.BeginInvoke(menu[command - 1].Value);
+        }
+        finally { DestroyMenu(popup); }
     }
     public bool Bounds(out NativeWindow.Rect bounds)
     {
         var identity = new NotifyIdentity { cbSize = (uint)Marshal.SizeOf(typeof(NotifyIdentity)), hWnd = hwnd, uID = 1 };
         BoundsResult=Shell_NotifyIconGetRect(ref identity, out bounds); return BoundsResult == 0;
     }
-    public void Dispose() { Shell_NotifyIcon(2,ref data); source.RemoveHook(Hook); menu.Dispose(); icon.Dispose(); }
+    public void Dispose() { Shell_NotifyIcon(2,ref data); source.RemoveHook(Hook); icon.Dispose(); }
     [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct NotifyData
     {
         public uint cbSize; public IntPtr hWnd; public uint uID,uFlags,uCallbackMessage; public IntPtr hIcon;
@@ -69,6 +90,13 @@ sealed class NativeTray : IDisposable
     [DllImport("shell32.dll")] static extern int Shell_NotifyIconGetRect(ref NotifyIdentity identity,out NativeWindow.Rect rect);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern uint RegisterWindowMessage(string message);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr handle);
+    [DllImport("user32.dll")] static extern IntPtr CreatePopupMenu();
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern bool AppendMenu(IntPtr menu,uint flags,UIntPtr id,string text);
+    [DllImport("user32.dll")] static extern bool SetMenuDefaultItem(IntPtr menu,uint item,uint byPosition);
+    [DllImport("user32.dll")] static extern int TrackPopupMenuEx(IntPtr menu,uint flags,int x,int y,IntPtr owner,IntPtr parameters);
+    [DllImport("user32.dll")] static extern bool DestroyMenu(IntPtr menu);
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr handle,uint message,IntPtr w,IntPtr l);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
 }
 
 static class NativeWindow
@@ -81,37 +109,16 @@ static class NativeWindow
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr handle,out Rect rect);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr handle,IntPtr after,int x,int y,int width,int height,uint flags);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out Point point);
     [DllImport("shcore.dll")] static extern int GetDpiForMonitor(IntPtr monitor,int kind,out uint x,out uint y);
-    [DllImport("gdi32.dll")] static extern IntPtr CreatePolygonRgn(Point[] points,int count,int fillMode);
-    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
-    [DllImport("user32.dll")] static extern int SetWindowRgn(IntPtr handle,IntPtr region,bool redraw);
     public static double Scale(IntPtr monitor)
     {
         uint x,y; try { if(GetDpiForMonitor(monitor,0,out x,out y)==0) return x/96.0; } catch(EntryPointNotFoundException) {} catch(DllNotFoundException) {}
         return 1;
     }
-    public static void Shape(Window window,Geometry geometry)
+    public static double PrimaryScale()
     {
-        IntPtr handle = new WindowInteropHelper(window).Handle;
-        var presentation = PresentationSource.FromVisual(window);
-        if(handle==IntPtr.Zero || presentation==null || presentation.CompositionTarget==null) return;
-        var transform=presentation.CompositionTarget.TransformToDevice;
-        var points=new List<Point>();
-        var flattened=geometry.GetFlattenedPathGeometry(0.1,ToleranceType.Absolute);
-        Transform shapeTransform=flattened.Transform ?? Transform.Identity;
-        foreach(var figure in flattened.Figures)
-        {
-            var first=transform.Transform(shapeTransform.Transform(figure.StartPoint)); points.Add(new Point((int)Math.Round(first.X),(int)Math.Round(first.Y)));
-            foreach(var segment in figure.Segments)
-            {
-                var line=segment as PolyLineSegment;
-                if(line!=null) foreach(var p in line.Points) { var pixel=transform.Transform(shapeTransform.Transform(p)); points.Add(new Point((int)Math.Round(pixel.X),(int)Math.Round(pixel.Y))); }
-                var single=segment as LineSegment;
-                if(single!=null) { var pixel=transform.Transform(shapeTransform.Transform(single.Point)); points.Add(new Point((int)Math.Round(pixel.X),(int)Math.Round(pixel.Y))); }
-            }
-        }
-        if(points.Count<3) return;
-        IntPtr region=CreatePolygonRgn(points.ToArray(),points.Count,2);
-        if(region!=IntPtr.Zero && SetWindowRgn(handle,region,true)==0) DeleteObject(region);
+        var origin = new Rect { Left = 0, Top = 0, Right = 1, Bottom = 1 };
+        return Scale(MonitorFromRect(ref origin, 1));
     }
 }

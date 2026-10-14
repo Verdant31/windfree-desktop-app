@@ -3,20 +3,20 @@
 <p align="center">Controle seus ares Samsung pela bandeja do Windows.</p>
 <p align="center"><strong>Windows x64</strong> · WPF · Conexão local</p>
 
-<p align="center"><img src="docs/screenshots/panel.png" width="540" alt="Painel do Brisa com seleção de cômodo, temperatura, WindFree e controles do ar"></p>
+<p align="center"><img src="docs/screenshots/panel.png" width="320" alt="Painel do Brisa no tema escuro com seleção de cômodo, temperatura, modo, ventilação, fluxo de ar, WindFree e sono"> <img src="docs/screenshots/panel-light.png" width="320" alt="Painel do Brisa no tema claro"></p>
 
-O Brisa abre junto ao ícone da bandeja e reúne temperatura, energia, modo, ventilação, sono, WindFree e direção do ar. O seletor no topo troca o cômodo; cada aparelho mantém sua própria identidade e seus controles disponíveis.
+O Brisa abre junto ao ícone da bandeja e reúne temperatura, energia, modo, ventilação, sono, WindFree e direção do ar. O seletor no topo troca o cômodo; cada aparelho mantém sua própria identidade e seus controles disponíveis. O painel segue o tema claro ou escuro, a cor de destaque e o alto contraste do Windows, com o material Mica no Windows 11.
 
 ## Usar
 
-Abra `Brisa.exe` e clique no floco de neve perto do relógio. Se o Windows ocultar o ícone, procure na seta **Mostrar ícones ocultos**. Clique fora do painel para recolhê-lo e use o menu do ícone para sair.
+Abra `Brisa.exe` e clique no floco de neve perto do relógio. Se o Windows ocultar o ícone, procure na seta **Mostrar ícones ocultos**. Clique fora do painel ou de novo no ícone para recolhê-lo e use o menu do ícone para sair.
 
 Escolha o cômodo, ajuste a temperatura pela barra ou pelos botões **− / +** e use os cartões para os demais controles. O aplicativo confirma as alterações pela resposta do aparelho. O botão de ajustes permite renomear o cômodo e atualizar seu IP.
 
 <details>
 <summary>Conexão e configurações</summary>
 
-<p align="center"><img src="docs/screenshots/settings.png" width="420" alt="Janela de configurações com nome do cômodo e IP local"></p>
+<p align="center"><img src="docs/screenshots/settings.png" width="380" alt="Janela de configurações com nome do cômodo e IP local"></p>
 
 Reserve um IP para cada ar no roteador. Se o endereço mudar, atualize o cadastro e reaplique a proteção de rede.
 

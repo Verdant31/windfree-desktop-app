@@ -2,7 +2,6 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -18,10 +17,9 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Markup;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
-using Forms = System.Windows.Forms;
-using Brush = System.Windows.Media.Brush;
 
 public static class Brisa
 {
@@ -191,23 +189,24 @@ sealed class RemotePanel : IDisposable
     readonly IStateBackend backend;
     NativeTray tray;
     readonly DeviceCatalog catalog = new DeviceCatalog();
-    readonly DispatcherTimer timer, temperatureCommit;
-    readonly Button power, minus, plus, refresh, connect, windfree, sleep;
+    readonly DispatcherTimer timer, temperatureCommit, restyle;
+    readonly Button minus, plus, refresh, connect;
+    readonly ToggleButton power, windfree, sleep;
     readonly ComboBox modes, fans, airflow, rooms;
     readonly Slider temperature;
-    readonly TextBlock status, room, setpoint, unit, minimum, maximum, sleepValue;
-    readonly System.Windows.Shapes.Path airDrawing, powerDrawing;
+    readonly TextBlock status, room, setpoint, unit, minimum, maximum, modeIcon, fanIcon, airflowIcon;
+    readonly System.Windows.Shapes.Path airDrawing, modeSnow;
+    readonly System.Windows.Shapes.Ellipse statusDot;
+    readonly FrameworkElement content, scroll;
+    readonly TranslateTransform airFlow = new TranslateTransform();
     Dictionary<string, object> state;
     bool busy, updating, live, exiting, configuring, draggingTemperature;
-    bool placing, pointerBottom;
-    double pointerX = 270;
+    bool placing, placedBelow, airOn, flowing;
+    DateTime hiddenAt = DateTime.MinValue;
+    readonly double designHeight;
     readonly string capture;
     readonly bool offline;
     readonly bool captureOnly, scrollBottom;
-    readonly Brush accent = new SolidColorBrush(System.Windows.Media.Color.FromRgb(185, 182, 164));
-    readonly Brush neutral = new SolidColorBrush(System.Windows.Media.Color.FromRgb(26, 27, 23));
-    readonly Brush ink = new SolidColorBrush(System.Windows.Media.Color.FromRgb(25, 27, 22));
-    readonly Brush text = new SolidColorBrush(System.Windows.Media.Color.FromRgb(232, 233, 225));
 
     T Find<T>(string name) where T : class { return Window.FindName(name) as T; }
 
@@ -220,22 +219,27 @@ sealed class RemotePanel : IDisposable
         scrollBottom = args.Contains("--scroll-bottom");
         int index = Array.IndexOf(args, "--capture");
         if (index >= 0 && index + 1 < args.Length) capture = Path.GetFullPath(args[index + 1]);
+        int themeIndex = Array.IndexOf(args, "--theme");
+        if (themeIndex >= 0 && themeIndex + 1 < args.Length) Theme.Forced = args[themeIndex + 1];
         using (var stream = File.OpenRead(Path.Combine(Brisa.Root, "src", "Ui.xaml"))) Window = (Window)XamlReader.Load(stream);
+        Theme.Load();
+        Theme.Apply(Window.Resources);
         int heightIndex = Array.IndexOf(args, "--height");
         int diagnosticHeight;
-        if (heightIndex >= 0 && heightIndex + 1 < args.Length && int.TryParse(args[heightIndex + 1], out diagnosticHeight)) Window.Height = Math.Max(480, Math.Min(900, diagnosticHeight));
-        power = Find<Button>("Power"); minus = Find<Button>("Minus"); plus = Find<Button>("Plus");
-        refresh = Find<Button>("Refresh"); connect = Find<Button>("Connect"); windfree = Find<Button>("WindFree");
+        if (heightIndex >= 0 && heightIndex + 1 < args.Length && int.TryParse(args[heightIndex + 1], out diagnosticHeight)) Window.Height = Math.Max(380, Math.Min(900, diagnosticHeight));
+        designHeight = Window.Height;
+        power = Find<ToggleButton>("Power"); minus = Find<Button>("Minus"); plus = Find<Button>("Plus");
+        refresh = Find<Button>("Refresh"); connect = Find<Button>("Connect"); windfree = Find<ToggleButton>("WindFree");
         modes = Find<ComboBox>("Modes"); fans = Find<ComboBox>("Fans"); airflow = Find<ComboBox>("Airflow"); rooms = Find<ComboBox>("Rooms");
         RoomChoices();
-        sleep = Find<Button>("Sleep"); sleepValue = Find<TextBlock>("SleepValue"); temperature = Find<Slider>("Temperature");
+        sleep = Find<ToggleButton>("Sleep"); temperature = Find<Slider>("Temperature");
         minimum = Find<TextBlock>("Minimum"); maximum = Find<TextBlock>("Maximum");
         status = Find<TextBlock>("Status"); room = Find<TextBlock>("Room"); setpoint = Find<TextBlock>("Setpoint"); unit = Find<TextBlock>("Unit");
-        airDrawing = Find<System.Windows.Shapes.Path>("AirDrawing"); powerDrawing = Find<System.Windows.Shapes.Path>("PowerDrawing");
-        Window.SizeChanged += delegate { FramePanel(); };
-        Find<ScrollViewer>("MainScroll").SizeChanged += delegate { FramePanel(); };
+        modeIcon = Find<TextBlock>("ModeIcon"); fanIcon = Find<TextBlock>("FanIcon"); airflowIcon = Find<TextBlock>("AirflowIcon");
+        modeSnow = Find<System.Windows.Shapes.Path>("ModeSnow"); statusDot = Find<System.Windows.Shapes.Ellipse>("StatusDot");
+        airDrawing = Find<System.Windows.Shapes.Path>("AirDrawing"); content = Find<FrameworkElement>("PanelContent"); scroll = Find<FrameworkElement>("MainScroll");
+        PaintAir();
         Find<System.Windows.Controls.Image>("Appliance").Source = new BitmapImage(new Uri(Path.Combine(Brisa.Root, "assets", "appliance.png")));
-        temperature.LayoutUpdated += delegate { UpdateTemperatureVisual(); };
         temperatureCommit = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
         temperatureCommit.Tick += async delegate { temperatureCommit.Stop(); await CommitTemperature(); };
         temperature.ValueChanged += delegate
@@ -248,11 +252,11 @@ sealed class RemotePanel : IDisposable
         };
         temperature.AddHandler(Thumb.DragStartedEvent, new DragStartedEventHandler(delegate { draggingTemperature = true; temperatureCommit.Stop(); }));
         temperature.AddHandler(Thumb.DragCompletedEvent, new DragCompletedEventHandler(async delegate { draggingTemperature = false; await CommitTemperature(); }));
-        power.Click += async delegate { if (state != null) await Change("power", !object.Equals(Brisa.Get(state, "power"), true)); };
+        power.Click += async delegate { await Toggle(power, "power"); };
         minus.Click += delegate { if (!busy && live) temperature.Value = Math.Max(temperature.Minimum, temperature.Value - 1); };
         plus.Click += delegate { if (!busy && live) temperature.Value = Math.Min(temperature.Maximum, temperature.Value + 1); };
-        windfree.Click += async delegate { if (state != null) await Change("windfree", !object.Equals(Brisa.Get(state, "windfree"), true)); };
-        sleep.Click += async delegate { if (state != null) await Change("sleep", !object.Equals(Brisa.Get(state, "sleep"), true)); };
+        windfree.Click += async delegate { await Toggle(windfree, "windfree"); };
+        sleep.Click += async delegate { await Toggle(sleep, "sleep"); };
         refresh.Click += async delegate { await Update(); };
         connect.Click += delegate { Configure(); };
         modes.SelectionChanged += async delegate { var item = modes.SelectedItem as Choice; if (!updating && !busy && item != null && !String.IsNullOrEmpty(item.Value)) await Change("mode", item.Value); };
@@ -271,18 +275,27 @@ sealed class RemotePanel : IDisposable
         Window.KeyDown += delegate(object sender, System.Windows.Input.KeyEventArgs e) { if (e.Key == Key.Escape) Hide(); };
         Window.Closing += delegate(object sender, System.ComponentModel.CancelEventArgs e) { if (!exiting) { e.Cancel = true; Hide(); } };
         Window.Deactivated += delegate { if (!configuring && capture == null) Hide(); };
-        var menu = new Forms.ContextMenuStrip();
-        menu.Items.Add("Abrir Brisa", null, delegate { Reveal(); });
-        menu.Items.Add("Configurar conexão", null, delegate { Reveal(); Configure(); });
-        menu.Items.Add(new Forms.ToolStripSeparator());
-        menu.Items.Add("Sair do Brisa", null, delegate { exiting = true; timer.Stop(); Window.Close(); application.Shutdown(); });
+        Window.IsVisibleChanged += delegate { Flow(); };
+        var menu = new List<KeyValuePair<string, Action>>
+        {
+            new KeyValuePair<string, Action>("Abrir Brisa", Reveal),
+            new KeyValuePair<string, Action>("Configurar conexão", delegate { Reveal(); Configure(); }),
+            new KeyValuePair<string, Action>(null, null),
+            new KeyValuePair<string, Action>("Sair do Brisa", delegate { exiting = true; timer.Stop(); Window.Close(); application.Shutdown(); })
+        };
+        restyle = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        restyle.Tick += delegate { restyle.Stop(); Restyle(); };
         Window.SourceInitialized += delegate
         {
-            tray=new NativeTray(Window,MakeIcon(),Reveal,menu);
+            Theme.Frame(Window);
+            Theme.Menus();
+            tray=new NativeTray(Window,Theme.TrayIcon(NativeWindow.PrimaryScale()),TrayActivate,menu);
             var source=HwndSource.FromHwnd(new WindowInteropHelper(Window).Handle);
             source.AddHook(delegate(IntPtr h,int msg,IntPtr w,IntPtr l,ref bool handled)
             {
-                if(msg==0x02e0) Window.Dispatcher.BeginInvoke(new Action(delegate { if(Window.IsVisible) Place(); FramePanel(); }));
+                if(msg==0x02e0) Window.Dispatcher.BeginInvoke(new Action(delegate { if(Window.IsVisible) Place(); }));
+                bool colors = msg==0x001A && (w.ToInt64()==0x43 || (l!=IntPtr.Zero && Marshal.PtrToStringUni(l)=="ImmersiveColorSet"));
+                if(colors || msg==0x0320 || msg==0x031A || msg==0x007E) { restyle.Stop(); restyle.Start(); }
                 return IntPtr.Zero;
             });
             Place();
@@ -293,7 +306,7 @@ sealed class RemotePanel : IDisposable
         {
             Place();
             if (!offline) await Update();
-            else { live = false; status.Text = "Sem conexão · Reconectar"; ShowError("Sem conexão. Verifique o Wi-Fi e o IP do ar nas configurações."); Enable(); }
+            else { live = false; SetStatus("Sem conexão · Reconectar", "Critical"); ShowError("Sem conexão. Verifique o Wi-Fi e o IP do ar nas configurações."); Enable(); }
             if (capture != null)
             {
                 if (scrollBottom) Find<ScrollViewer>("MainScroll").ScrollToEnd();
@@ -305,30 +318,14 @@ sealed class RemotePanel : IDisposable
         };
     }
 
-    [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr handle);
-    static Icon MakeIcon()
+    void Restyle()
     {
-        using (var bitmap = new Bitmap(32, 32))
-        using (var graphics = Graphics.FromImage(bitmap))
-        using (var pen = new System.Drawing.Pen(System.Drawing.Color.FromArgb(181, 221, 248), 2.3f))
-        {
-            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            for (int i = 0; i < 3; i++)
-            {
-                double angle = i * Math.PI / 3;
-                float x = (float)Math.Cos(angle), y = (float)Math.Sin(angle);
-                graphics.DrawLine(pen, 16 - x * 11, 16 - y * 11, 16 + x * 11, 16 + y * 11);
-                for (int sign = -1; sign <= 1; sign += 2)
-                {
-                    float px = 16 + x * 7 * sign, py = 16 + y * 7 * sign;
-                    graphics.DrawLine(pen, px, py, px - x * 3 * sign - y * 3, py - y * 3 * sign + x * 3);
-                    graphics.DrawLine(pen, px, py, px - x * 3 * sign + y * 3, py - y * 3 * sign - x * 3);
-                }
-            }
-            IntPtr handle = bitmap.GetHicon();
-            try { return (Icon)Icon.FromHandle(handle).Clone(); }
-            finally { DestroyIcon(handle); }
-        }
+        Theme.Load();
+        Theme.Apply(Window.Resources);
+        Theme.Frame(Window);
+        Theme.Menus();
+        PaintAir();
+        if (tray != null) tray.Icon = Theme.TrayIcon(NativeWindow.PrimaryScale());
     }
 
     void Place()
@@ -342,46 +339,41 @@ sealed class RemotePanel : IDisposable
             NativeWindow.Rect anchor;
             if(tray==null || !tray.Bounds(out anchor))
             {
-                var cursor=Forms.Cursor.Position;
+                NativeWindow.Point cursor;
+                NativeWindow.GetCursorPos(out cursor);
                 anchor=new NativeWindow.Rect{Left=cursor.X,Right=cursor.X+1,Top=cursor.Y,Bottom=cursor.Y+1};
             }
             IntPtr monitor=NativeWindow.MonitorFromRect(ref anchor,2);
             var info=new NativeWindow.Monitor{Size=(uint)Marshal.SizeOf(typeof(NativeWindow.Monitor))};
             if(!NativeWindow.GetMonitorInfo(monitor,ref info)) return;
             double scale=NativeWindow.Scale(monitor);
-            Window.Height=Math.Min(Window.Height,Math.Max(380,info.Work.Height/scale-16));
-            int width=(int)Math.Round(Window.Width*scale), height=(int)Math.Round(Window.Height*scale), gap=(int)Math.Round(8*scale);
+            Window.Height=Math.Min(designHeight,Math.Max(380,info.Work.Height/scale-24));
+            int width=(int)Math.Round(Window.Width*scale), height=(int)Math.Round(Window.Height*scale), gap=(int)Math.Round(12*scale);
             int center=(anchor.Left+anchor.Right)/2;
             int x=Math.Max(info.Work.Left+gap,Math.Min(info.Work.Right-width-gap,center-width/2));
             bool top=info.Work.Top>info.Bounds.Top;
-            pointerBottom=!top;
+            placedBelow=top;
             int y=top ? info.Work.Top+gap : info.Work.Bottom-height-gap;
             if(info.Work.Left>info.Bounds.Left) { x=info.Work.Left+gap; y=Math.Max(info.Work.Top+gap,Math.Min(info.Work.Bottom-height-gap,anchor.Top-height/2)); }
             if(info.Work.Right<info.Bounds.Right) { x=info.Work.Right-width-gap; y=Math.Max(info.Work.Top+gap,Math.Min(info.Work.Bottom-height-gap,anchor.Top-height/2)); }
-            pointerX=Math.Max(36,Math.Min(Window.Width-36,(center-x)/scale));
             Window.Topmost=true;
             NativeWindow.SetWindowPos(handle,new IntPtr(-1),x,y,width,height,0x10|0x40);
-            FramePanel();
         }
         finally { placing=false; }
     }
-    void FramePanel()
+    void TrayActivate() { if ((DateTime.UtcNow - hiddenAt).TotalMilliseconds > 300) Reveal(); }
+    public void Reveal()
     {
-        double width = Window.ActualWidth, height = Window.ActualHeight;
-        if (width < 100 || height < 100) return;
-        string outline = String.Format(CultureInfo.InvariantCulture,
-            "M 30 14 H {0} C {1} 14 {2} 1 {3} 1 C {4} 1 {5} 14 {6} 14 H {7} Q {8} 14 {8} 44 V {9} Q {8} {10} {7} {10} H 31 Q 1 {10} 1 {9} V 44 Q 1 14 30 14 Z",
-            pointerX-21, pointerX-12, pointerX-11, pointerX, pointerX+11, pointerX+12, pointerX+21, width-31, width-1, height-31, height-1);
-        var geometry=Geometry.Parse(outline).Clone();
-        if(pointerBottom) geometry.Transform=new MatrixTransform(1,0,0,-1,0,height);
-        Find<System.Windows.Shapes.Path>("PanelOutline").Data = geometry;
-        NativeWindow.Shape(Window,geometry);
-        var scroll = Find<ScrollViewer>("MainScroll");
-        scroll.Margin=pointerBottom ? new Thickness(2,2,2,15) : new Thickness(2,15,2,2);
-        if (scroll.ActualWidth > 0 && scroll.ActualHeight > 0)
-            scroll.Clip = new RectangleGeometry(new Rect(0,0,scroll.ActualWidth,scroll.ActualHeight), 28,28);
+        bool shown = Window.IsVisible;
+        Window.Show(); Place(); Window.Activate(); NativeWindow.SetForegroundWindow(new WindowInteropHelper(Window).Handle);
+        if (!shown) Entrance();
     }
-    public void Reveal() { Window.Show(); Place(); Window.Activate(); NativeWindow.SetForegroundWindow(new WindowInteropHelper(Window).Handle); }
+    void Entrance()
+    {
+        var move = content.RenderTransform as TranslateTransform;
+        if (move != null) move.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(placedBelow ? -16 : 16, 0, TimeSpan.FromMilliseconds(333)) { EasingFunction = new ExponentialEase { EasingMode = EasingMode.EaseOut, Exponent = 6 } });
+        content.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(167)));
+    }
     void Hide()
     {
         temperatureCommit.Stop(); draggingTemperature = false;
@@ -395,6 +387,7 @@ sealed class RemotePanel : IDisposable
                 finally { updating = false; }
             }
         }
+        if (Window.IsVisible) hiddenAt = DateTime.UtcNow;
         Window.Hide(); Window.Topmost=false;
     }
 
@@ -435,12 +428,11 @@ sealed class RemotePanel : IDisposable
         try
         {
             Window.Title="Brisa — " + catalog.Name;
-            setpoint.Text="—"; room.Text="—"; minimum.Text="—"; maximum.Text="—";
-            temperature.Value=temperature.Minimum; airDrawing.Opacity=0;
+            setpoint.Text="—"; unit.Text=""; room.Text="—"; minimum.Text="—"; maximum.Text="—";
+            temperature.Value=temperature.Minimum; Air(false);
             Choices(modes,new Choice[0],""); Choices(fans,new Choice[0],""); Choices(airflow,new Choice[0],"");
-            sleepValue.Text="—"; Find<Border>("WindThumb").HorizontalAlignment=System.Windows.HorizontalAlignment.Left;
-            powerDrawing.Stroke=new SolidColorBrush(System.Windows.Media.Color.FromRgb(112,117,103));
-            Find<System.Windows.Shapes.Ellipse>("SleepDot").Fill=neutral;
+            power.IsChecked=false; windfree.IsChecked=false; sleep.IsChecked=false;
+            Glyphs();
             Find<Border>("ErrorPanel").Visibility=Visibility.Collapsed;
             if(tray!=null) tray.Text="Brisa — " + catalog.Name;
         }
@@ -460,21 +452,66 @@ sealed class RemotePanel : IDisposable
         }
     }
 
-    static bool HasChoices(ComboBox box) { return box.Items.Cast<Choice>().Any(item => !String.IsNullOrEmpty(item.Value)); }
-
-    void UpdateTemperatureVisual()
+    void Glyphs()
     {
-        var clipHost = temperature.Template.FindName("TemperatureFillClip", temperature) as Grid;
-        var fill = temperature.Template.FindName("TemperatureFill", temperature) as Border;
-        var track = temperature.Template.FindName("PART_Track", temperature) as Track;
-        if (clipHost == null || fill == null || track == null || track.Thumb == null || clipHost.ActualWidth <= 0 || clipHost.ActualHeight <= 0) return;
-        var bounds = new Rect(0, 0, clipHost.ActualWidth, clipHost.ActualHeight);
-        var clip = clipHost.Clip as RectangleGeometry;
-        if (clip == null || clip.Rect != bounds) clipHost.Clip = new RectangleGeometry(bounds, 15, 15);
-        double right = track.Thumb.TranslatePoint(new System.Windows.Point(track.Thumb.ActualWidth, 0), clipHost).X;
-        double width = Math.Max(0, Math.Min(clipHost.ActualWidth, right));
-        if (Math.Abs(fill.Width - width) > 0.01) fill.Width = width;
+        var mode = modes.SelectedItem as Choice;
+        string glyph;
+        switch (mode == null ? "" : mode.Value)
+        {
+            case "Heat": glyph = ""; break; case "Dry": glyph = ""; break;
+            case "Wind": case "Fan": glyph = ""; break; case "Auto": glyph = ""; break;
+            default: glyph = ""; break;
+        }
+        modeIcon.Text = glyph;
+        modeSnow.Visibility = glyph.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        var fan = fans.SelectedItem as Choice;
+        switch (fan == null ? "" : fan.Label)
+        {
+            case "Baixa": fanIcon.Text = ""; break; case "Alta": case "Turbo": fanIcon.Text = ""; break;
+            default: fanIcon.Text = ""; break;
+        }
+        var flow = airflow.SelectedItem as Choice;
+        switch (flow == null ? "" : flow.Value)
+        {
+            case "Up_And_Low": airflowIcon.Text = ""; break; case "Left_And_Right": airflowIcon.Text = ""; break;
+            case "All": airflowIcon.Text = ""; break; default: airflowIcon.Text = ""; break;
+        }
     }
+
+    void PaintAir()
+    {
+        var color = Theme.Air;
+        var stroke = new LinearGradientBrush { StartPoint = new System.Windows.Point(0, 0), EndPoint = new System.Windows.Point(0, 1), SpreadMethod = GradientSpreadMethod.Repeat, RelativeTransform = airFlow };
+        stroke.GradientStops.Add(new GradientStop(System.Windows.Media.Color.FromArgb(70, color.R, color.G, color.B), 0));
+        stroke.GradientStops.Add(new GradientStop(System.Windows.Media.Color.FromArgb(220, color.R, color.G, color.B), 0.5));
+        stroke.GradientStops.Add(new GradientStop(System.Windows.Media.Color.FromArgb(70, color.R, color.G, color.B), 1));
+        airDrawing.Stroke = stroke;
+    }
+    void Air(bool on)
+    {
+        if (on == airOn) return;
+        airOn = on;
+        airDrawing.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(on ? 1 : 0, TimeSpan.FromMilliseconds(400)));
+        Flow();
+    }
+    void Flow()
+    {
+        bool run = airOn && Window.IsVisible;
+        if (run == flowing) return;
+        flowing = run;
+        if (!run) { airFlow.BeginAnimation(TranslateTransform.YProperty, null); return; }
+        var animation = new DoubleAnimation(0, 1, TimeSpan.FromSeconds(2.6)) { RepeatBehavior = RepeatBehavior.Forever };
+        Timeline.SetDesiredFrameRate(animation, 30);
+        airFlow.BeginAnimation(TranslateTransform.YProperty, animation);
+    }
+
+    void SetStatus(string text, string tone)
+    {
+        status.Text = text;
+        statusDot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, tone);
+    }
+
+    static bool HasChoices(ComboBox box) { return box.Items.Cast<Choice>().Any(item => !String.IsNullOrEmpty(item.Value)); }
 
     void Choices(ComboBox box, IEnumerable<Choice> options, string selected)
     {
@@ -493,13 +530,13 @@ sealed class RemotePanel : IDisposable
             double? target = Brisa.Number(Brisa.Get(state, "setpoint"));
             double? ambient = Brisa.Number(Brisa.Get(state, "room"));
             setpoint.Text = target.HasValue ? target.Value.ToString("0.#", CultureInfo.GetCultureInfo("pt-BR")) : "—";
-            unit.Text = suffix;
-            room.Text = ambient.HasValue ? ambient.Value.ToString("0.#", CultureInfo.GetCultureInfo("pt-BR")) + suffix : "—";
+            unit.Text = target.HasValue ? suffix : "";
+            room.Text = ambient.HasValue ? ambient.Value.ToString("0.#", CultureInfo.GetCultureInfo("pt-BR")) + " " + suffix : "—";
             bool on = object.Equals(Brisa.Get(state, "power"), true);
-            power.Background = neutral; powerDrawing.Stroke = on ? accent : new SolidColorBrush(System.Windows.Media.Color.FromRgb(112, 117, 103));
+            power.IsChecked = on;
             power.ToolTip = (on ? "Desligar " : "Ligar ") + catalog.Name;
             System.Windows.Automation.AutomationProperties.SetName(power, Brisa.Text(power.ToolTip));
-            airDrawing.Opacity = on ? 0.42 : 0;
+            Air(on);
             double? lower = Brisa.Number(Brisa.Get(state, "min")), upper = Brisa.Number(Brisa.Get(state, "max"));
             if (lower.HasValue && upper.HasValue && upper > lower) { temperature.Maximum = upper.Value; temperature.Minimum = lower.Value; }
             if (target.HasValue) temperature.Value = target.Value;
@@ -510,16 +547,15 @@ sealed class RemotePanel : IDisposable
             var fanValues = (Brisa.Get(state, "fans") as IEnumerable) ?? new object[0];
             Choices(fans, fanValues.Cast<Dictionary<string, object>>().Select(item => new Choice { Value = Brisa.Text(Brisa.Get(item, "value")), Label = Label(Brisa.Text(Brisa.Get(item, "label"))) }), Brisa.Text(Brisa.Get(state, "fan")));
             bool wind = object.Equals(Brisa.Get(state, "windfree"), true);
-            Find<Border>("WindThumb").HorizontalAlignment = wind ? System.Windows.HorizontalAlignment.Right : System.Windows.HorizontalAlignment.Left;
-            Find<Border>("WindThumb").Background = wind ? text : new SolidColorBrush(System.Windows.Media.Color.FromRgb(162,166,153));
-            windfree.ToolTip = object.Equals(Brisa.Get(state, "windfree_supported"), true) ? "WindFree " + (wind ? "ativado" : "desativado") : "WindFree indisponível neste aparelho";
+            windfree.IsChecked = wind;
+            windfree.ToolTip = object.Equals(Brisa.Get(state, "windfree_supported"), true) ? "WindFree " + (wind ? "ativado" : "desativado") + ": refrigeração sem vento direto" : "WindFree indisponível neste aparelho";
             bool sleeping = object.Equals(Brisa.Get(state, "sleep"), true);
-            sleepValue.Text = object.Equals(Brisa.Get(state, "sleep_supported"), true) ? (sleeping ? "Ligado" : "Desligado") : "—";
-            Find<System.Windows.Shapes.Ellipse>("SleepDot").Fill = sleeping ? accent : new SolidColorBrush(System.Windows.Media.Color.FromRgb(79,82,70));
+            sleep.IsChecked = sleeping;
+            sleep.ToolTip = object.Equals(Brisa.Get(state, "sleep_supported"), true) ? "Modo sono " + (sleeping ? "ativado" : "desativado") : "Modo sono indisponível neste aparelho";
             var airValues = (Brisa.Get(state, "airflows") as IEnumerable) ?? new object[0];
             Choices(airflow, airValues.Cast<object>().Select(item => new Choice { Value = Brisa.Text(item), Label = Label(Brisa.Text(item)) }), Brisa.Text(Brisa.Get(state, "airflow")));
-            status.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(177,181,166));
-            status.Text = "Conectado";
+            Glyphs();
+            SetStatus("Conectado", "Success");
             status.ToolTip = catalog.Name + " · " + (on ? "ligado" : "desligado") + " · leitura às " + DateTime.Now.ToString("HH:mm:ss");
             Find<Border>("ErrorPanel").Visibility = Visibility.Collapsed;
             if(tray!=null) tray.Text = catalog.Name + " · " + (target.HasValue ? setpoint.Text + suffix : "Brisa") + " · " + (on ? "ligado" : "desligado");
@@ -531,6 +567,7 @@ sealed class RemotePanel : IDisposable
     {
         if (busy || offline) return;
         temperatureCommit.Stop();
+        bool quiet = operation == "state" && live && state != null;
         busy = true;
         if(operation=="set" && state!=null)
         {
@@ -539,7 +576,8 @@ sealed class RemotePanel : IDisposable
             preview[control=="temperature"?"setpoint":control]=value;
             Render(preview); state=confirmed;
         }
-        Enable(); status.Text = operation == "set" ? "Confirmando alteração…" : "Conectando a " + catalog.Name + "…";
+        if (quiet) { scroll.IsHitTestVisible = false; status.Text = "Atualizando…"; }
+        else { Enable(); SetStatus(operation == "set" ? "Confirmando alteração…" : "Conectando a " + catalog.Name + "…", "Caution"); }
         try
         {
             var next=await backend.Request(operation,control,value);
@@ -554,14 +592,19 @@ sealed class RemotePanel : IDisposable
             string message = error is InvalidOperationException ? error.Message : "Não foi possível conectar ao ar. Verifique o Wi-Fi e clique em Reconectar.";
             if (state != null) message += "\nOs valores exibidos são da última leitura.";
             ShowError(message);
-            status.Text = "Sem conexão · Reconectar";
-            status.Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(244, 184, 163));
+            SetStatus("Sem conexão · Reconectar", "Critical");
             if(tray!=null) tray.Text = "Brisa — " + catalog.Name + " sem conexão";
         }
-        finally { busy = false; Enable(); }
+        finally { busy = false; scroll.IsHitTestVisible = true; Enable(); }
     }
     Task Update() { return Run("state", null, null); }
     Task Change(string control, object value) { return Run("set", control, value); }
+    async Task Toggle(ToggleButton button, string control)
+    {
+        bool current = object.Equals(Brisa.Get(state, control), true);
+        button.IsChecked = current;
+        if (state != null) await Change(control, !current);
+    }
 
     async Task CommitTemperature()
     {
@@ -588,7 +631,7 @@ sealed class RemotePanel : IDisposable
         Reveal();
     }
 
-    Window BuildSettings()
+    internal Window BuildSettings()
     {
         Window dialog;
         using(var stream=File.OpenRead(Path.Combine(Brisa.Root,"src","Settings.xaml"))) dialog=(Window)XamlReader.Load(stream);
@@ -599,9 +642,8 @@ sealed class RemotePanel : IDisposable
         var name=(TextBox)dialog.FindName("NameField"); var ipField=(TextBox)dialog.FindName("IpField");
         name.Text=catalog.Name; ipField.Text=Brisa.Text(config["ip"]);
         ((TextBlock)dialog.FindName("IdentityHint")).Text=object.Equals(Brisa.Get(config,"identified"),false) ? "Este ar pode ser Quarto ou Gourmet. Identifique o aparelho e dê o nome do cômodo abaixo." : "Configurações de " + catalog.Name;
-        Action shape=delegate { NativeWindow.Shape(dialog,new RectangleGeometry(new Rect(0,0,dialog.ActualWidth,dialog.ActualHeight),18,18)); };
-        dialog.ContentRendered+=delegate { shape(); name.Focus(); };
-        dialog.SizeChanged+=delegate { if(dialog.ActualWidth>0) shape(); };
+        dialog.SourceInitialized+=delegate { Theme.Frame(dialog); };
+        dialog.ContentRendered+=delegate { name.Focus(); name.SelectAll(); };
         ((Grid)dialog.FindName("DialogHeader")).MouseLeftButtonDown+=delegate(object sender,MouseButtonEventArgs e) { if(e.Source is TextBlock || e.Source is Grid) dialog.DragMove(); };
         ((Button)dialog.FindName("Dismiss")).Click+=delegate { dialog.DialogResult=false; };
         ((Button)dialog.FindName("Cancel")).Click+=delegate { dialog.DialogResult=false; };
@@ -628,22 +670,25 @@ sealed class RemotePanel : IDisposable
         return dialog;
     }
 
-    void Capture(string path)
+    internal static void Capture(Window window, string path)
     {
-        Window.UpdateLayout();
-        var presentation=PresentationSource.FromVisual(Window);
+        window.UpdateLayout();
+        var presentation=PresentationSource.FromVisual(window);
         double scale=presentation==null ? 1 : presentation.CompositionTarget.TransformToDevice.M11;
-        var bitmap = new RenderTargetBitmap((int)Math.Ceiling(Window.ActualWidth*scale), (int)Math.Ceiling(Window.ActualHeight*scale), 96*scale, 96*scale, PixelFormats.Pbgra32);
+        var bounds=new Rect(0,0,window.ActualWidth,window.ActualHeight);
+        var bitmap = new RenderTargetBitmap((int)Math.Ceiling(bounds.Width*scale), (int)Math.Ceiling(bounds.Height*scale), 96*scale, 96*scale, PixelFormats.Pbgra32);
         var visual=new DrawingVisual();
         using(var drawing=visual.RenderOpen())
         {
-            drawing.PushClip(Find<System.Windows.Shapes.Path>("PanelOutline").Data);
-            drawing.DrawRectangle(new VisualBrush(Window){Stretch=Stretch.None,AlignmentX=AlignmentX.Left,AlignmentY=AlignmentY.Top},null,new Rect(0,0,Window.ActualWidth,Window.ActualHeight));
+            drawing.PushClip(new RectangleGeometry(bounds,8,8));
+            drawing.DrawRectangle(new SolidColorBrush(Theme.Solid),null,bounds);
+            drawing.DrawRectangle(new VisualBrush(window){Stretch=Stretch.None,AlignmentX=AlignmentX.Left,AlignmentY=AlignmentY.Top},null,bounds);
             drawing.Pop();
         }
         bitmap.Render(visual);
         var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using (var file = File.Create(path)) encoder.Save(file);
     }
-    public void Dispose() { timer.Stop(); temperatureCommit.Stop(); if(tray!=null) tray.Dispose(); backend.Dispose(); }
+    void Capture(string path) { Capture(Window, path); }
+    public void Dispose() { timer.Stop(); temperatureCommit.Stop(); restyle.Stop(); if(tray!=null) tray.Dispose(); backend.Dispose(); }
 }
