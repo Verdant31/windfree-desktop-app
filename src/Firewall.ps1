@@ -2,7 +2,7 @@
 param(
     [ValidateSet('Plan', 'Apply', 'Verify', 'Remove')]
     [string]$Mode = 'Verify',
-    [string]$AppRoot = (Split-Path -Parent $PSScriptRoot),
+    [string]$AppRoot,
     [string]$ReportPath
 )
 
@@ -19,6 +19,12 @@ function ConvertFrom-IPv4Number([uint64]$Number) {
     return '{0}.{1}.{2}.{3}' -f (($Number -shr 24) -band 255), (($Number -shr 16) -band 255), (($Number -shr 8) -band 255), ($Number -band 255)
 }
 
+# Windows stores a one-address range "a-a" as "a", so emit it that way or the verification never matches.
+function Format-IPv4Range([uint64]$Start, [uint64]$End) {
+    if ($Start -eq $End) { return ConvertFrom-IPv4Number $Start }
+    return '{0}-{1}' -f (ConvertFrom-IPv4Number $Start), (ConvertFrom-IPv4Number $End)
+}
+
 function Get-BlockedIPv4Ranges([string[]]$Addresses) {
     $exceptions = @([pscustomobject]@{Start = [uint64]2130706432; End = [uint64]2147483647})
     foreach ($address in $Addresses) {
@@ -28,12 +34,12 @@ function Get-BlockedIPv4Ranges([string[]]$Addresses) {
     $cursor = [uint64]0
     foreach ($exception in @($exceptions | Sort-Object Start)) {
         if ($exception.Start -gt $cursor) {
-            '{0}-{1}' -f (ConvertFrom-IPv4Number $cursor), (ConvertFrom-IPv4Number ($exception.Start - 1))
+            Format-IPv4Range $cursor ($exception.Start - 1)
         }
         if ($exception.End -ge $cursor) { $cursor = $exception.End + 1 }
     }
     if ($cursor -le 4294967295) {
-        '{0}-{1}' -f (ConvertFrom-IPv4Number $cursor), '255.255.255.255'
+        Format-IPv4Range $cursor 4294967295
     }
 }
 
@@ -102,6 +108,8 @@ function Assert-Policy($Specifications, [string]$Group) {
 }
 
 try {
+    # Windows PowerShell 5.1 leaves $PSScriptRoot empty in param defaults under -File, so resolve it here.
+    if (!$AppRoot) { $AppRoot = Split-Path -Parent $PSScriptRoot }
     $AppRoot = (Resolve-Path -LiteralPath $AppRoot).Path.TrimEnd('\')
     $hasher = [Security.Cryptography.SHA256]::Create()
     try {
