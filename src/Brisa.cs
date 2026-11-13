@@ -584,6 +584,8 @@ sealed class RemotePanel : IDisposable
             string id=Brisa.Text(Brisa.Get(next,"device_id"));
             if(id.Length>0 && id!=catalog.Selected) throw new InvalidOperationException("A resposta pertence a outro aparelho. Selecione o cômodo novamente.");
             Render(next);
+            string warning=Brisa.Text(Brisa.Get(next,"warning"));
+            if(warning.Length>0) { ShowError(warning); SetStatus("Conectado · alteração não confirmada", "Caution"); }
         }
         catch (Exception error)
         {

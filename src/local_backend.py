@@ -91,13 +91,31 @@ def resource_map(body) -> dict:
 def first(value):
     return value[0] if isinstance(value, list) and value else value
 
+def temperature_item(resources):
+    items = resources.get("/temperatures/vs/0", {}).get(PREFIX + "items", [])
+    return next((item for item in items if isinstance(item, dict) and str(item.get(PREFIX + "id")) == "0"), {})
+
+def numeric(value):
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
 def normalize_state(resources: dict) -> dict:
     room = resources.get("/temperature/current/0", {})
     desired = resources.get("/temperature/desired/0", {})
     if not desired:
         combined = resources.get("/temperatures/vs/0", {})
+        item = temperature_item(resources)
+        if item:
+            combined = item
         room = {"temperature": combined.get(PREFIX + "current"), "units": combined.get(PREFIX + "unit", "C")}
         desired = {"temperature": combined.get(PREFIX + "desired"), "units": combined.get(PREFIX + "unit", "C"), "range": combined.get(PREFIX + "range", [])}
+        if item:
+            desired["range"] = [numeric(item.get(PREFIX + "minimum")), numeric(item.get(PREFIX + "maximum"))]
+        room["temperature"] = numeric(room["temperature"])
+        desired["temperature"] = numeric(desired["temperature"])
+        desired["units"] = "F" if desired["units"] in ("F", "Fahrenheit") else "C"
     power = resources.get("/power/vs/0", {}).get(PREFIX + "power")
     if power is None and "/power/0" in resources:
         power = "On" if resources["/power/0"].get("value") else "Off"
@@ -132,6 +150,9 @@ def command_for(state: dict, resources: dict, control: str, value):
             raise BrisaError("Temperatura inválida.")
         if state.get("min") is None or state.get("max") is None or not state["min"] <= value <= state["max"]:
             raise BrisaError("Temperatura fora do intervalo permitido pelo aparelho.")
+        item = temperature_item(resources)
+        if item:
+            return "/temperatures/vs/0", {PREFIX + "items": [{PREFIX + "id": item[PREFIX + "id"], PREFIX + "desired": str(float(value))}]}
         if "/temperature/desired/0" not in resources:
             raise BrisaError("O aparelho não disponibilizou este controle de temperatura.")
         return "/temperature/desired/0", {"temperature": value}
@@ -247,9 +268,10 @@ class LocalController:
         after = self.read()
         key = {"temperature": "setpoint"}.get(control, control)
         if after.get(key) != value:
+            time.sleep(1)
             after = self.read()
         if after.get(key) != value:
-            raise BrisaError("O comando foi recebido, mas a alteração ainda não foi confirmada. Atualize o estado.")
+            after["warning"] = "O ar respondeu, mas não confirmou a alteração. Os valores exibidos são da leitura atual."
         return after
 
 def main():
